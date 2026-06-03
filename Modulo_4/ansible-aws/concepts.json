@@ -1,0 +1,353 @@
+{
+  "lab_id": "ansible-aws",
+  "lab_title": "Deploy a Spring Boot Application on AWS EC2 with Ansible",
+  "extracted_at": "2026-06-02T20:46:38.585623+00:00",
+
+  "scenario": {
+    "description": "Lo studente automatizza, tramite playbook Ansible, l'intero ciclo di provisioning di un'istanza EC2 su AWS e il deploy di un'applicazione Spring Boot eseguita come servizio systemd.",
+    "business_context": "Automazione del deploy di applicazioni JVM su infrastruttura cloud AWS tramite Infrastructure as Code.",
+    "estimated_duration_minutes": 90
+  },
+
+  "audience": {
+    "target": "Sviluppatori o DevOps engineer che conoscono Ansible di base e vogliono estendere le competenze al provisioning cloud AWS.",
+    "experience_level": "intermediate",
+    "knowledge_prerequisites": [
+      "YAML: indentazione significativa, liste e mapping",
+      "Concetto base di idempotenza in Ansible",
+      "Modello AWS di base: Region, VPC default, Security Group, Key Pair, EC2, AMI",
+      "Spring Boot produce un fat JAR eseguibile con java -jar",
+      "Ansible installato localmente (ansible-core >=2.16)",
+      "Python 3.9+ sul control node",
+      "AWS account con accesso programmatico (Access Key + Secret Key)",
+      "Key Pair EC2 preesistente nella region target"
+    ]
+  },
+
+  "learning_objectives": [
+    {
+      "objective": "Strutturare un progetto Ansible con ansible.cfg, inventory, playbook e ruoli",
+      "coverage": ["Task 1"]
+    },
+    {
+      "objective": "Provisionare un Security Group e un'istanza EC2 con i moduli amazon.aws",
+      "coverage": ["Task 3", "Task 4"]
+    },
+    {
+      "objective": "Usare il plugin di inventory dinamico aws_ec2 per scoprire host taggati",
+      "coverage": ["Task 2"]
+    },
+    {
+      "objective": "Scrivere un role idempotente che installa la toolchain Java, clona un'app Spring Boot, la compila con Maven e la avvia come servizio systemd",
+      "coverage": ["Task 5"]
+    },
+    {
+      "objective": "Verificare end-to-end il deploy con curl sulla porta esposta dall'app",
+      "coverage": ["Task 6"]
+    }
+  ],
+
+  "concepts_introduced": [
+    {
+      "name": "Ansible Project Layout",
+      "category": "principle",
+      "description_brief": "Struttura di directory standard Ansible che separa ansible.cfg, inventory/, playbooks/ e roles/ per favorire il riuso e il versionamento indipendente dei componenti.",
+      "why_it_matters": "La separazione tra inventory, playbook e role consente di versionare e riusare i role tra progetti diversi senza duplicazioni. Un progetto Ansible non strutturato accumula debito tecnico non appena si aggiunge un secondo target o un secondo ambiente. La convenzione è riconosciuta da Ansible Galaxy e dai tool di CI/CD che assumono questa gerarchia.",
+      "introduced_in_tasks": ["Task 1"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Dynamic Inventory",
+      "category": "technique",
+      "description_brief": "Meccanismo per cui Ansible scopre gli host a runtime da sorgenti esterne (es. tag EC2) anziché da file statici con IP predefiniti.",
+      "why_it_matters": "In ambienti cloud gli IP delle istanze sono assegnati al momento del lancio e cambiano ad ogni ciclo di vita. L'inventory dinamico elimina la gestione manuale di file statici che diventano obsoleti, rendendo il playbook dichiarativo anche per la fase di discovery degli host. È il pattern standard per infrastrutture effimere e multi-account.",
+      "introduced_in_tasks": ["Task 2"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Idempotenza del Playbook",
+      "category": "principle",
+      "description_brief": "Proprietà per cui eseguire lo stesso playbook più volte produce sempre lo stesso stato finale senza effetti collaterali su risorse già configurate.",
+      "why_it_matters": "L'idempotenza trasforma il playbook da script di deploy one-shot a meccanismo di convergenza: può essere rieseguito in sicurezza per riportare uno stato drifted alla configurazione attesa. Il lab mostra come ottenerla (changed_when: git_clone.changed) e come verificarla empiricamente tramite un secondo run che deve riportare changed=0 sulla play di deploy.",
+      "introduced_in_tasks": ["Task 5", "Task 6"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Ansible Role",
+      "category": "architecture_pattern",
+      "description_brief": "Unità modulare e riusabile di task, defaults, handlers e file che incapsula una funzione di configurazione specifica, indipendentemente dal contesto di deploy.",
+      "why_it_matters": "I role permettono di estrarre la logica di configurazione dell'applicazione dal playbook di provisioning, rendendola riusabile su diversi provider cloud o ambienti. Sono il principale meccanismo di condivisione su Ansible Galaxy e il confine naturale per il test isolato delle funzioni di configurazione, separato dalla logica di orchestrazione.",
+      "introduced_in_tasks": ["Task 1", "Task 5"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Ansible Handlers",
+      "category": "technique",
+      "description_brief": "Task speciali eseguiti al più una volta per play, solo se notificati da altri task in seguito a una modifica effettiva, per gestire azioni post-change in modo idempotente.",
+      "why_it_matters": "I handler evitano il pattern anti-idempotente di eseguire daemon_reload o service restart ad ogni run indipendentemente da modifiche. L'esecuzione one-shot garantisce che azioni costose (ricaricamento del daemon systemd) avvengano solo quando c'è effettivamente una modifica alla unit file. La combinazione con meta: flush_handlers permette di controllare esattamente il punto di esecuzione all'interno della play.",
+      "introduced_in_tasks": ["Task 5"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "In-memory Inventory con add_host",
+      "category": "technique",
+      "description_brief": "Tecnica Ansible per registrare dinamicamente un host durante l'esecuzione di una play e renderlo disponibile alle play successive nel medesimo playbook run.",
+      "why_it_matters": "In un playbook multi-play che crea infrastruttura e poi la configura, l'IP dell'istanza non esiste al momento della pianificazione. add_host risolve il problema senza richiedere file temporanei, inventory intermedi o una doppia invocazione del playbook, mantenendo il deploy completamente contenuto in un singolo comando ansible-playbook.",
+      "introduced_in_tasks": ["Task 4"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Security Group con restrizione IP",
+      "category": "principle",
+      "description_brief": "Creazione di regole ingress limitate al CIDR /32 dell'IP pubblico del control node, anziché aprire le porte a 0.0.0.0/0.",
+      "why_it_matters": "Esporre SSH (22) e porte applicative (8080) a tutto Internet durante un lab è la causa più comune di compromissioni di ambienti temporanei. Limitare l'accesso al solo IP corrente riduce drasticamente la superficie di attacco senza impattare l'usabilità del lab, e stabilisce un pattern corretto da replicare in ambienti reali dove le porte di gestione non dovrebbero mai essere pubbliche.",
+      "introduced_in_tasks": ["Task 3"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "systemd Service Unit per applicazione JVM",
+      "category": "technique",
+      "description_brief": "Definizione di una unit systemd per avviare e gestire un processo Java come servizio di sistema, con restart on failure e logging via journald.",
+      "why_it_matters": "Un processo avviato con nohup non sopravvive al reboot, non ha restart automatico e non integra il logging centralizzato. systemd offre persistenza, retry policy configurabile e SuccessExitStatus=143 per la corretta gestione di SIGTERM dalla JVM; i log sono accessibili con journalctl senza configurare log rotation aggiuntiva, semplificando il troubleshooting in produzione.",
+      "introduced_in_tasks": ["Task 5"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "AMI Resolution via SSM Parameter Store",
+      "category": "technique",
+      "description_brief": "Recupero a runtime dell'AMI ID più recente di Amazon Linux tramite un parametro pubblico del servizio AWS SSM, evitando ID hardcodati nel playbook.",
+      "why_it_matters": "Gli AMI ID sono regionali e cambiano nel tempo; hardcodarli produce playbook che smettono di funzionare silenziosamente quando l'AMI viene deprecata. I parametri pubblici SSM sono mantenuti aggiornati da AWS per ogni region.",
+      "introduced_in_tasks": ["Task 4"],
+      "depth": "used_intermediate"
+    }
+  ],
+
+  "tools_and_services": [
+    {
+      "name": "Ansible (ansible-core)",
+      "category": "framework",
+      "version_used": ">=2.16,<2.22",
+      "depth": "prerequisite"
+    },
+    {
+      "name": "amazon.aws Ansible Collection",
+      "category": "library",
+      "version_used": ">=7.0.0,<12.0.0",
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Python 3",
+      "category": "language",
+      "version_used": ">=3.9",
+      "depth": "prerequisite"
+    },
+    {
+      "name": "boto3",
+      "category": "library",
+      "version_used": ">=1.34",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "botocore",
+      "category": "library",
+      "version_used": ">=1.34",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "AWS EC2",
+      "category": "service",
+      "version_used": "any",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "AWS Security Groups",
+      "category": "service",
+      "version_used": "any",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "AWS SSM Parameter Store",
+      "category": "service",
+      "version_used": "any",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "Amazon Linux 2023",
+      "category": "service",
+      "version_used": "latest AMI via SSM public parameter",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "Spring Boot (spring-petclinic)",
+      "category": "framework",
+      "version_used": "main branch",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "Maven",
+      "category": "tool",
+      "version_used": "any (sistema o mvnw)",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "Java 21 (Amazon Corretto)",
+      "category": "language",
+      "version_used": "21",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "systemd",
+      "category": "tool",
+      "version_used": "any",
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Git",
+      "category": "tool",
+      "version_used": "any",
+      "depth": "prerequisite"
+    },
+    {
+      "name": "AWS CLI",
+      "category": "tool",
+      "version_used": "v2",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "curl",
+      "category": "tool",
+      "version_used": "any",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "jq",
+      "category": "tool",
+      "version_used": "any",
+      "depth": "used_intermediate"
+    },
+    {
+      "name": "OpenSSH client",
+      "category": "tool",
+      "version_used": ">=8.0",
+      "depth": "used_intermediate"
+    }
+  ],
+
+  "paradigms": [
+    {
+      "name": "Infrastructure as Code",
+      "description_brief": "Gestione dell'infrastruttura tramite file dichiarativi versionabili (playbook YAML), eliminando la configurazione manuale e rendendo l'ambiente riproducibile.",
+      "introduced_in_tasks": ["Task 1", "Task 2", "Task 3", "Task 4", "Task 5"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Declarative Configuration Management",
+      "description_brief": "Descrizione dello stato desiderato dell'infrastruttura anziché della sequenza di operazioni da eseguire per raggiungerlo; Ansible converge verso lo stato desiderato ad ogni run.",
+      "introduced_in_tasks": ["Task 1", "Task 5", "Task 6"],
+      "depth": "introduced_here"
+    },
+    {
+      "name": "Least Privilege",
+      "description_brief": "Principio per cui ogni processo viene eseguito con i minimi permessi necessari; applicato creando un utente di sistema dedicato per il servizio Spring Boot e restringendo le regole ingress del Security Group.",
+      "introduced_in_tasks": ["Task 3", "Task 5"],
+      "depth": "used_intermediate"
+    }
+  ],
+
+  "architecture": {
+    "description": "Il lab segue un'architettura a due play: la prima gira su localhost e interagisce con le API AWS tramite la collection amazon.aws per creare Security Group e istanza EC2; la seconda gira sull'istanza EC2 appena creata, raggiunta via SSH, e applica il role springboot che installa la toolchain, clona il sorgente da GitHub, lo builda con Maven e avvia l'applicazione come servizio systemd. Il plugin di inventory dinamico aws_ec2 e il modulo add_host collegano i due layer senza file intermedi.",
+    "components": [
+      {
+        "name": "Control Node",
+        "role": "Esegue ansible-playbook, ospita l'inventory dinamico, comunica con AWS API via boto3"
+      },
+      {
+        "name": "AWS Security Group (ansible-lab-sg)",
+        "role": "Filtra il traffico ingress verso l'EC2: porta 22 e 8080 permesse solo dal CIDR /32 del control node"
+      },
+      {
+        "name": "AWS EC2 Instance (t3.micro, Amazon Linux 2023)",
+        "role": "Host target su cui viene applicato il role springboot; espone la porta 8080"
+      },
+      {
+        "name": "Role springboot",
+        "role": "Installa Java 21 + Git + Maven, crea utente dedicato, clona il repo, builda il fat JAR, installa la unit systemd"
+      },
+      {
+        "name": "systemd service (springboot-app)",
+        "role": "Gestisce il ciclo di vita del processo JVM sull'istanza EC2 con restart on failure e logging via journald"
+      },
+      {
+        "name": "GitHub (spring-petclinic)",
+        "role": "Sorgente dell'applicazione Spring Boot clonato durante l'esecuzione del role"
+      },
+      {
+        "name": "AWS SSM Parameter Store (pubblico)",
+        "role": "Fornisce a runtime l'AMI ID più recente di Amazon Linux 2023 per la region target"
+      },
+      {
+        "name": "Dynamic Inventory (aws_ec2 plugin)",
+        "role": "Scopre a runtime le istanze EC2 taggate workshop=ansible-lab e le rende disponibili come host Ansible"
+      }
+    ],
+    "communication_flow": [
+      "Control node → AWS API (HTTPS/boto3): crea Security Group con regole ingress ristrette al CIDR del control node",
+      "Control node → AWS SSM (HTTPS): risolve AMI ID di Amazon Linux 2023 per la region target",
+      "Control node → AWS API (HTTPS/boto3): lancia istanza EC2 t3.micro con il Security Group creato e attende SSH",
+      "Control node → EC2:22 (SSH/Ansible): applica il role springboot sull'istanza tramite connessione SSH",
+      "EC2 → GitHub (HTTPS): clona il repository spring-petclinic durante l'esecuzione del role",
+      "EC2 (locale): Maven builda il fat JAR; systemd installa e avvia il servizio springboot-app",
+      "Control node → EC2:8080 (HTTP/curl): verifica che l'applicazione risponda con HTTP 200"
+    ]
+  },
+
+  "tasks_overview": [
+    {
+      "task_number": 1,
+      "title": "Scaffolding del progetto e configurazione Ansible",
+      "estimated_minutes": 15,
+      "concepts_used": ["Ansible Project Layout", "Ansible Role", "amazon.aws Ansible Collection"]
+    },
+    {
+      "task_number": 2,
+      "title": "Inventory dinamico tramite plugin aws_ec2",
+      "estimated_minutes": 10,
+      "concepts_used": ["Dynamic Inventory", "amazon.aws Ansible Collection"]
+    },
+    {
+      "task_number": 3,
+      "title": "Provisioning del Security Group",
+      "estimated_minutes": 10,
+      "concepts_used": ["Security Group con restrizione IP", "Idempotenza del Playbook", "amazon.aws Ansible Collection"]
+    },
+    {
+      "task_number": 4,
+      "title": "Playbook di provisioning EC2",
+      "estimated_minutes": 15,
+      "concepts_used": ["In-memory Inventory con add_host", "AMI Resolution via SSM Parameter Store", "amazon.aws Ansible Collection"]
+    },
+    {
+      "task_number": 5,
+      "title": "Role springboot: installa toolchain, clona, builda, avvia",
+      "estimated_minutes": 20,
+      "concepts_used": ["Ansible Role", "Ansible Handlers", "Idempotenza del Playbook", "systemd Service Unit per applicazione JVM"]
+    },
+    {
+      "task_number": 6,
+      "title": "Esecuzione end-to-end e verifica HTTP",
+      "estimated_minutes": 20,
+      "concepts_used": ["Idempotenza del Playbook", "Dynamic Inventory"]
+    }
+  ],
+
+  "skills_acquired_summary": [
+    "Strutturare un progetto Ansible multi-componente (ansible.cfg, inventory, playbooks, roles) secondo le convenzioni standard",
+    "Configurare e usare il plugin di inventory dinamico amazon.aws.aws_ec2 per scoprire istanze EC2 tramite tag",
+    "Provisionare Security Group EC2 con regole ingress ristrette al CIDR del control node tramite Ansible",
+    "Lanciare istanze EC2 con AMI risolto dinamicamente via SSM Parameter Store e attendere la disponibilità SSH",
+    "Scrivere un Ansible role con defaults, tasks e handlers rispettando il principio di idempotenza",
+    "Usare Ansible Handlers e meta: flush_handlers per gestire daemon_reload systemd in modo idempotente",
+    "Avviare un'applicazione Spring Boot come servizio systemd con restart on failure e logging via journald",
+    "Verificare end-to-end un deploy con curl e validare l'idempotenza del playbook tramite secondo run"
+  ]
+}

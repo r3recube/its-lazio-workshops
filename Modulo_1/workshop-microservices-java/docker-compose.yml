@@ -1,0 +1,124 @@
+services:
+
+  bikes-db:
+    image: mysql:8.0
+    container_name: bikes-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: bikesdb
+      MYSQL_USER: bikesuser
+      MYSQL_PASSWORD: bikespwd
+    volumes:
+      - bikes-data:/var/lib/mysql
+    networks:
+      - workshop-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      retries: 10
+
+  cars-db:
+    image: mysql:8.0
+    container_name: cars-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: carsdb
+      MYSQL_USER: carsuser
+      MYSQL_PASSWORD: carspwd
+    volumes:
+      - cars-data:/var/lib/mysql
+    networks:
+      - workshop-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      retries: 10
+
+  garage-db:
+    image: mysql:8.0
+    container_name: garage-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: garagedb
+      MYSQL_USER: garageuser
+      MYSQL_PASSWORD: garagepwd
+    volumes:
+      - garage-data:/var/lib/mysql
+    networks:
+      - workshop-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      retries: 10
+
+  bikes-service:
+    build: ./bikes-service
+    container_name: bikes-service
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://bikes-db:3306/bikesdb
+      SPRING_DATASOURCE_USERNAME: bikesuser
+      SPRING_DATASOURCE_PASSWORD: bikespwd
+    depends_on:
+      bikes-db:
+        condition: service_healthy
+    networks:
+      - workshop-net
+
+  cars-service:
+    build: ./cars-service
+    container_name: cars-service
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://cars-db:3306/carsdb
+      SPRING_DATASOURCE_USERNAME: carsuser
+      SPRING_DATASOURCE_PASSWORD: carspwd
+    depends_on:
+      cars-db:
+        condition: service_healthy
+    networks:
+      - workshop-net
+
+  garage-service:
+    build: ./garage-service
+    container_name: garage-service
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://garage-db:3306/garagedb
+      SPRING_DATASOURCE_USERNAME: garageuser
+      SPRING_DATASOURCE_PASSWORD: garagepwd
+      SERVICES_BIKES_URL: http://bikes-service:8081
+      SERVICES_CARS_URL: http://cars-service:8082
+    depends_on:
+      garage-db:
+        condition: service_healthy
+      bikes-service:
+        condition: service_started
+      cars-service:
+        condition: service_started
+    networks:
+      - workshop-net
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    ports:
+      - "8080:80"
+    networks:
+      - workshop-net
+    depends_on:
+      - bikes-service
+      - cars-service
+      - garage-service
+
+volumes:
+  bikes-data:
+  cars-data:
+  garage-data:
+
+networks:
+  workshop-net:
+    driver: bridge

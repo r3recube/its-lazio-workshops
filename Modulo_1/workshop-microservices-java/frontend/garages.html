@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Garages</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+  <nav class="navbar navbar-dark bg-dark">
+    <div class="container">
+      <a class="navbar-brand" href="index.html">🏍️🚗 Garage Manager</a>
+      <ul class="navbar-nav ms-auto">
+        <li class="nav-item"><a class="nav-link" href="bikes.html">Bikes</a></li>
+        <li class="nav-item"><a class="nav-link" href="cars.html">Cars</a></li>
+        <li class="nav-item"><a class="nav-link" href="garages.html">Garages</a></li>
+      </ul>
+    </div>
+  </nav>
+  <main class="container py-4">
+    <h2>🏠 Garages</h2>
+
+    <form id="garage-form" class="row g-2 mb-4">
+      <div class="col"><input class="form-control" name="ownerName" placeholder="Owner name" required></div>
+      <div class="col"><input class="form-control" name="address" placeholder="Address" required></div>
+      <div class="col-auto"><button class="btn btn-warning">Add Garage</button></div>
+    </form>
+    <div id="error-msg" class="alert alert-danger d-none"></div>
+    <div id="garages-list"></div>
+  </main>
+
+  <script src="js/app.js"></script>
+  <script>
+    const errorEl = document.getElementById('error-msg');
+
+    async function loadGarages() {
+      const garages = await fetchAll('garages');
+      const container = document.getElementById('garages-list');
+      container.innerHTML = '';
+      garages.forEach(g => container.appendChild(garageCard(g)));
+    }
+
+    function garageCard(g) {
+      const card = document.createElement('div');
+      card.className = 'card mb-3';
+      card.innerHTML = `
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <strong>#${g.id} — ${g.ownerName}</strong>
+          <span class="text-muted">${g.address}</span>
+          <button class="btn btn-sm btn-danger" onclick="deleteGarage(${g.id}, this)">🗑 Delete</button>
+        </div>
+        <div class="card-body">
+          <h6>Vehicles</h6>
+          <ul id="vehicles-${g.id}" class="list-group mb-2">
+            ${(g.vehicles || []).map(v =>
+              `<li class="list-group-item d-flex justify-content-between">
+                ${v.vehicleType} #${v.externalId}
+                <button class="btn btn-sm btn-outline-danger" onclick="removeVehicle(${g.id}, ${v.id}, this)">✕</button>
+              </li>`
+            ).join('')}
+          </ul>
+          <form class="row g-2" onsubmit="addVehicle(event, ${g.id})">
+            <div class="col"><input type="number" class="form-control form-control-sm" name="externalId" placeholder="Vehicle ID" required></div>
+            <div class="col">
+              <select class="form-select form-select-sm" name="vehicleType" required>
+                <option value="">Type...</option>
+                <option value="BIKE">BIKE</option>
+                <option value="CAR">CAR</option>
+              </select>
+            </div>
+            <div class="col-auto"><button class="btn btn-sm btn-primary">Add Vehicle</button></div>
+          </form>
+        </div>`;
+      return card;
+    }
+
+    async function deleteGarage(id, btn) {
+      await remove('garages', id);
+      btn.closest('.card').remove();
+    }
+
+    async function addVehicle(e, garageId) {
+      e.preventDefault();
+      const form = e.target;
+      const data = { externalId: Number(form.externalId.value), vehicleType: form.vehicleType.value };
+      try {
+        errorEl.classList.add('d-none');
+        const r = await fetch(`${API.garages}/${garageId}/vehicles`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        if (!r.ok) {
+          const msg = await r.text();
+          errorEl.textContent = 'Error: ' + msg;
+          errorEl.classList.remove('d-none');
+          return;
+        }
+        form.reset();
+        loadGarages();
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.classList.remove('d-none');
+      }
+    }
+
+    async function removeVehicle(garageId, vehicleId, btn) {
+      await fetch(`${API.garages}/${garageId}/vehicles/${vehicleId}`, { method: 'DELETE' });
+      btn.closest('li').remove();
+    }
+
+    document.getElementById('garage-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const data = Object.fromEntries(new FormData(e.target).entries());
+      await create('garages', data);
+      e.target.reset();
+      loadGarages();
+    };
+
+    loadGarages();
+  </script>
+</body>
+</html>

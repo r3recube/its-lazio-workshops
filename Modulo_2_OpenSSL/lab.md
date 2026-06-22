@@ -94,6 +94,125 @@ test -d "$LAB_DIR" \
 
 ---
 
+## IAM Configuration
+
+Questa sezione configura l'identità IAM con cui il lab opera: un utente dedicato con policy a privilegio minimo, le sue credenziali programmatiche e il profilo AWS CLI corrispondente. Tutti i task successivi che interagiscono con AWS useranno questo profilo, isolando le operazioni di laboratorio dall'utente admin.
+
+### 1. Crea l'utente IAM
+
+```bash
+export LAB_IAM_USER="${USER_PREFIX}-lab-user"
+aws iam create-user --user-name "$LAB_IAM_USER"
+echo "IAM user created: $LAB_IAM_USER"
+```
+
+### 2. Crea Access Key e Secret Key
+
+```bash
+# Il Secret Access Key è mostrato UNA SOLA VOLTA: salvalo subito.
+aws iam create-access-key --user-name "$LAB_IAM_USER" > lab_iam_credentials.json
+export LAB_ACCESS_KEY_ID=$(jq -r '.AccessKey.AccessKeyId' lab_iam_credentials.json)
+export LAB_SECRET_KEY=$(jq -r '.AccessKey.SecretAccessKey' lab_iam_credentials.json)
+echo "Access Key ID: $LAB_ACCESS_KEY_ID"
+```
+
+### 3. Applica la policy IAM
+
+La policy concede le sole permission necessarie ai task del lab: operazioni S3 sul bucket del lab e uso della KMS key. Non include permission amministrative.
+
+**File to create:** `lab-iam-policy.json`
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3LabBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::LAB_BUCKET_PLACEHOLDER",
+        "arn:aws:s3:::LAB_BUCKET_PLACEHOLDER/*"
+      ]
+    },
+    {
+      "Sid": "KMSLabKey",
+      "Effect": "Allow",
+      "Action": [
+        "kms:GenerateDataKey",
+        "kms:Decrypt",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "kms:RequestAlias": "alias/LAB_PREFIX_PLACEHOLDER-*"
+        }
+      }
+    }
+  ]
+}
+```
+
+```bash
+# Sostituiamo i placeholder e attacchiamo la policy all'utente come inline policy.
+export LAB_BUCKET_NAME="${USER_PREFIX}-crypto-lab"
+sed -e "s|LAB_BUCKET_PLACEHOLDER|$LAB_BUCKET_NAME|g" \
+    -e "s|LAB_PREFIX_PLACEHOLDER|$USER_PREFIX|g" \
+    lab-iam-policy.json > lab-iam-policy-final.json
+
+aws iam put-user-policy \
+  --user-name "$LAB_IAM_USER" \
+  --policy-name "${USER_PREFIX}-lab-policy" \
+  --policy-document file://lab-iam-policy-final.json
+
+echo "Policy attached to $LAB_IAM_USER"
+```
+
+### 4. Configura AWS CLI
+
+```bash
+# Configuriamo il profilo `lab-user` con le credenziali appena generate.
+aws configure set aws_access_key_id "$LAB_ACCESS_KEY_ID" --profile lab-user
+aws configure set aws_secret_access_key "$LAB_SECRET_KEY" --profile lab-user
+aws configure set region "$AWS_REGION" --profile lab-user
+aws configure set output "json" --profile lab-user
+```
+
+```bash
+# Le credenziali IAM hanno propagazione eventuale: attendiamo prima di testare.
+echo "Waiting 15s for IAM credential propagation..."
+sleep 15
+```
+
+```bash
+# Verifica: l'utente deve poter chiamare sts:GetCallerIdentity (non richiede permission esplicita).
+aws --profile lab-user sts get-caller-identity
+```
+
+**Expected outcome:**
+- L'utente IAM `$LAB_IAM_USER` esiste con una inline policy
+- Il profilo CLI `lab-user` è configurato in `~/.aws/credentials`
+- `sts:GetCallerIdentity` ritorna l'ARN dell'utente lab (non quello admin)
+
+**Success criterion:**
+
+```bash
+aws iam get-user-policy \
+  --user-name "$LAB_IAM_USER" \
+  --policy-name "${USER_PREFIX}-lab-policy" > /dev/null \
+  && aws --profile lab-user sts get-caller-identity \
+       --query 'Arn' --output text | grep -q "$LAB_IAM_USER" \
+  && echo "IAM Configuration OK"
+```
+
+---
+
 ## Task 1 — OpenSSL Basics
 
 **Goal:** Familiarizzare con la CLI di OpenSSL: generare bytes casuali con qualità crittografica, calcolare digest e ispezionare un certificato esistente.

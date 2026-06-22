@@ -39,48 +39,62 @@ jq --version              # jq (parsing JSON delle risposte AWS)
 - Conoscenza di base degli oggetti AWS: S3 bucket, IAM user/policy, EC2 instance, security group
 - Notazione ARN (Amazon Resource Name) e formato JSON delle IAM policy
 
-## Setup
+## IAM Configuration
 
-Il setup configura le variabili d'ambiente, verifica l'accesso AWS e prepara la directory di lavoro. Tutti i task del lab assumono che queste variabili siano esportate nella shell corrente.
+Le credenziali AWS sono già disponibili tramite l'**AWS Access Portal**. Seguire i seguenti passi per ottenere le credenziali e configurare l'ambiente di lavoro.
+
+### 1. Ottieni le credenziali dall'Access Portal
+
+1. Accedi all'**AWS Access Portal** fornito dall'istruttore
+2. Seleziona l'account AWS del lab
+3. Clicca su **Access keys** (o "Credenziali di accesso")
+4. Scegli **Option 2: Add a profile to your AWS credentials file** e copia i valori di `aws_access_key_id`, `aws_secret_access_key` e `aws_session_token`
+
+Configura il profilo `lab-provisioned`:
 
 ```bash
-# Configurazione AWS: il profilo `lab-provisioned` è quello creato dal factory
-# con credenziali admin sull'account dedicato al lab.
+aws configure set aws_access_key_id "<AWS_ACCESS_KEY_ID>" --profile lab-provisioned
+aws configure set aws_secret_access_key "<AWS_SECRET_ACCESS_KEY>" --profile lab-provisioned
+aws configure set aws_session_token "<AWS_SESSION_TOKEN>" --profile lab-provisioned
+aws configure set region eu-west-1 --profile lab-provisioned
+```
+
+> **Nota:** le credenziali dell'Access Portal includono un `aws_session_token` perché sono credenziali temporanee STS. Devono essere aggiornate alla scadenza (tipicamente ogni ora).
+
+### 2. Configura le variabili d'ambiente
+
+Tutti i task del lab assumono che queste variabili siano esportate nella shell corrente.
+
+```bash
 export AWS_PROFILE=lab-provisioned
 export AWS_REGION=eu-west-1
 export AWS_DEFAULT_REGION=eu-west-1
 ```
 
 ```bash
-# Prefisso personale: viene usato per i nomi globalmente unici (bucket S3, KMS alias).
-# Usiamo whoami normalizzato + epoch corto per garantire unicità anche in aula condivisa.
+# Prefisso personale: usato per i nomi globalmente unici (bucket S3, KMS alias).
 export USER_PREFIX="$(whoami | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9' | cut -c1-12)-$(date +%s | tail -c 6)"
 echo "USER_PREFIX=$USER_PREFIX"
 ```
 
 ```bash
-# Directory di lavoro del lab. Tutti i file generati (chiavi, certificati, ciphertext)
-# vivranno qui per facilitare il cleanup finale.
+# Directory di lavoro del lab.
 export LAB_DIR="$HOME/crypto-lab"
 mkdir -p "$LAB_DIR"
 cd "$LAB_DIR"
 ```
 
 ```bash
-# AWS Account ID: serve per costruire ARN espliciti nelle policy IAM/KMS.
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID"
 ```
 
 ```bash
-# IP pubblico della workstation: serve per restringere le regole SG di SSH al solo IP del learner.
 export MY_IP=$(curl -s https://checkip.amazonaws.com)
 echo "MY_IP=$MY_IP"
 ```
 
-### Verifica setup
-
-Il comando seguente fallisce (exit != 0) se uno qualsiasi dei prerequisiti non è soddisfatto.
+### 3. Verifica accesso
 
 ```bash
 test -d "$LAB_DIR" \
@@ -89,127 +103,13 @@ test -d "$LAB_DIR" \
   && test -n "$MY_IP" \
   && aws sts get-caller-identity > /dev/null \
   && openssl version > /dev/null \
-  && echo "Setup OK"
-```
-
----
-
-## IAM Configuration
-
-Questa sezione configura l'identità IAM con cui il lab opera: un utente dedicato con policy a privilegio minimo, le sue credenziali programmatiche e il profilo AWS CLI corrispondente. Tutti i task successivi che interagiscono con AWS useranno questo profilo, isolando le operazioni di laboratorio dall'utente admin.
-
-### 1. Crea l'utente IAM
-
-```bash
-export LAB_IAM_USER="${USER_PREFIX}-lab-user"
-aws iam create-user --user-name "$LAB_IAM_USER"
-echo "IAM user created: $LAB_IAM_USER"
-```
-
-### 2. Crea Access Key e Secret Key
-
-```bash
-# Il Secret Access Key è mostrato UNA SOLA VOLTA: salvalo subito.
-aws iam create-access-key --user-name "$LAB_IAM_USER" > lab_iam_credentials.json
-export LAB_ACCESS_KEY_ID=$(jq -r '.AccessKey.AccessKeyId' lab_iam_credentials.json)
-export LAB_SECRET_KEY=$(jq -r '.AccessKey.SecretAccessKey' lab_iam_credentials.json)
-echo "Access Key ID: $LAB_ACCESS_KEY_ID"
-```
-
-### 3. Applica la policy IAM
-
-La policy concede le sole permission necessarie ai task del lab: operazioni S3 sul bucket del lab e uso della KMS key. Non include permission amministrative.
-
-**File to create:** `lab-iam-policy.json`
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "S3LabBucket",
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:GetObject",
-        "s3:DeleteObject",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::LAB_BUCKET_PLACEHOLDER",
-        "arn:aws:s3:::LAB_BUCKET_PLACEHOLDER/*"
-      ]
-    },
-    {
-      "Sid": "KMSLabKey",
-      "Effect": "Allow",
-      "Action": [
-        "kms:GenerateDataKey",
-        "kms:Decrypt",
-        "kms:DescribeKey"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringLike": {
-          "kms:RequestAlias": "alias/LAB_PREFIX_PLACEHOLDER-*"
-        }
-      }
-    }
-  ]
-}
-```
-
-```bash
-# Sostituiamo i placeholder e attacchiamo la policy all'utente come inline policy.
-export LAB_BUCKET_NAME="${USER_PREFIX}-crypto-lab"
-sed -e "s|LAB_BUCKET_PLACEHOLDER|$LAB_BUCKET_NAME|g" \
-    -e "s|LAB_PREFIX_PLACEHOLDER|$USER_PREFIX|g" \
-    lab-iam-policy.json > lab-iam-policy-final.json
-
-aws iam put-user-policy \
-  --user-name "$LAB_IAM_USER" \
-  --policy-name "${USER_PREFIX}-lab-policy" \
-  --policy-document file://lab-iam-policy-final.json
-
-echo "Policy attached to $LAB_IAM_USER"
-```
-
-### 4. Configura AWS CLI
-
-```bash
-# Configuriamo il profilo `lab-user` con le credenziali appena generate.
-aws configure set aws_access_key_id "$LAB_ACCESS_KEY_ID" --profile lab-user
-aws configure set aws_secret_access_key "$LAB_SECRET_KEY" --profile lab-user
-aws configure set region "$AWS_REGION" --profile lab-user
-aws configure set output "json" --profile lab-user
-```
-
-```bash
-# Le credenziali IAM hanno propagazione eventuale: attendiamo prima di testare.
-echo "Waiting 15s for IAM credential propagation..."
-sleep 15
-```
-
-```bash
-# Verifica: l'utente deve poter chiamare sts:GetCallerIdentity (non richiede permission esplicita).
-aws --profile lab-user sts get-caller-identity
+  && echo "IAM Configuration OK"
 ```
 
 **Expected outcome:**
-- L'utente IAM `$LAB_IAM_USER` esiste con una inline policy
-- Il profilo CLI `lab-user` è configurato in `~/.aws/credentials`
-- `sts:GetCallerIdentity` ritorna l'ARN dell'utente lab (non quello admin)
-
-**Success criterion:**
-
-```bash
-aws iam get-user-policy \
-  --user-name "$LAB_IAM_USER" \
-  --policy-name "${USER_PREFIX}-lab-policy" > /dev/null \
-  && aws --profile lab-user sts get-caller-identity \
-       --query 'Arn' --output text | grep -q "$LAB_IAM_USER" \
-  && echo "IAM Configuration OK"
-```
+- `sts:GetCallerIdentity` ritorna l'ARN dell'utente/ruolo del lab
+- Tutte le variabili d'ambiente sono valorizzate
+- Il profilo `lab-provisioned` è configurato in `~/.aws/credentials`
 
 ---
 

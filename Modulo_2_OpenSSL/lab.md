@@ -392,13 +392,9 @@ test -s rsa_private.pem \
 **Steps:**
 
 ```bash
-# Definiamo i nomi delle risorse. Il bucket name deve essere globalmente unico,
-# quindi includiamo USER_PREFIX. Il nome utente IAM è unico solo all'interno dell'account.
+# Definiamo il nome del bucket. Deve essere globalmente unico: includiamo USER_PREFIX.
 export BUCKET_NAME="${USER_PREFIX}-crypto-lab"
-export IAM_USER_NAME="${USER_PREFIX}-crypto-user"
-export IAM_POLICY_NAME="${USER_PREFIX}-crypto-s3-policy"
 echo "BUCKET_NAME=$BUCKET_NAME"
-echo "IAM_USER_NAME=$IAM_USER_NAME"
 ```
 
 ```bash
@@ -417,11 +413,6 @@ aws s3api put-public-access-block \
   --bucket "$BUCKET_NAME" \
   --public-access-block-configuration \
     "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-```
-
-```bash
-# Creiamo l'utente IAM. Non aggiungiamo l'utente a nessun gruppo: assegneremo solo una inline policy.
-aws iam create-user --user-name "$IAM_USER_NAME"
 ```
 
 **File to create:** `s3-least-privilege-policy.json`
@@ -456,78 +447,22 @@ aws iam create-user --user-name "$IAM_USER_NAME"
 ```
 
 ```bash
-# Sostituiamo il placeholder con il bucket reale. Lasciamo ListBucket perché AWS CLI
-# spesso fa una HEAD/LIST implicita prima di un cp, e senza essa l'errore sarebbe confuso.
-# Il principio di least privilege è rispettato: nessun delete, nessun policy management.
+# Sostituiamo il placeholder con il bucket reale.
 sed "s|BUCKET_PLACEHOLDER|$BUCKET_NAME|g" s3-least-privilege-policy.json > s3-policy-final.json
 cat s3-policy-final.json
 ```
 
-```bash
-# Attacchiamo la policy come inline policy all'utente. Inline = vive solo per questo utente,
-# non è una policy IAM gestita riutilizzabile. Adatto per credenziali per-utente.
-aws iam put-user-policy \
-  --user-name "$IAM_USER_NAME" \
-  --policy-name "$IAM_POLICY_NAME" \
-  --policy-document file://s3-policy-final.json
-```
-
-```bash
-# Generiamo Access Key e Secret Key. ATTENZIONE: il Secret Access Key è mostrato UNA SOLA VOLTA.
-# Lo salviamo subito in un file locale (non commettere in git!) per usarlo nel profilo CLI.
-aws iam create-access-key --user-name "$IAM_USER_NAME" > iam_credentials.json
-export RESTRICTED_ACCESS_KEY_ID=$(jq -r '.AccessKey.AccessKeyId' iam_credentials.json)
-export RESTRICTED_SECRET_KEY=$(jq -r '.AccessKey.SecretAccessKey' iam_credentials.json)
-echo "Access Key ID created: $RESTRICTED_ACCESS_KEY_ID"
-```
-
-```bash
-# Configuriamo un profilo CLI separato `crypto-restricted` con queste credenziali.
-# Il profilo punta agli stessi region; resta isolato dal profilo admin `lab-provisioned`.
-aws configure set aws_access_key_id "$RESTRICTED_ACCESS_KEY_ID" --profile crypto-restricted
-aws configure set aws_secret_access_key "$RESTRICTED_SECRET_KEY" --profile crypto-restricted
-aws configure set region "$AWS_REGION" --profile crypto-restricted
-```
-
-```bash
-# La propagazione delle credenziali IAM è eventuale: una nuova access key può non essere
-# riconosciuta immediatamente. Aspettiamo ~10 secondi prima di testarla.
-echo "Waiting 15s for IAM credential propagation..."
-sleep 15
-```
-
-```bash
-# Test della least privilege: l'utente ristretto deve poter mettere e leggere oggetti sul bucket.
-echo "test from restricted user" > probe.txt
-aws --profile crypto-restricted s3 cp probe.txt "s3://$BUCKET_NAME/probe.txt"
-aws --profile crypto-restricted s3 cp "s3://$BUCKET_NAME/probe.txt" probe_downloaded.txt
-diff probe.txt probe_downloaded.txt && echo "Restricted profile PutObject/GetObject OK"
-```
-
-```bash
-# Verifichiamo che l'utente NON possa fare operazioni non concesse (es. delete).
-# Ci aspettiamo un errore AccessDenied: catturiamo lo stderr e verifichiamo che fallisca.
-if aws --profile crypto-restricted s3 rm "s3://$BUCKET_NAME/probe.txt" 2>/dev/null; then
-  echo "ERROR: delete should not be allowed!"
-  exit 1
-else
-  echo "Confirmed: delete is denied as expected (least privilege working)"
-fi
-```
+> **Nota:** Le operazioni S3 che seguono usano il profilo `lab-provisioned` configurato nella sezione **IAM Configuration**. Non è necessario creare un utente IAM separato: le credenziali dell'Access Portal sono sufficienti per il lab.
 
 **Expected outcome:**
 - Bucket `$BUCKET_NAME` esiste in `eu-west-1` con block public access attivo
-- Utente IAM `$IAM_USER_NAME` esiste con una sola inline policy
-- Profilo CLI `crypto-restricted` può fare PUT e GET sul bucket
-- Profilo CLI `crypto-restricted` non può fare DELETE (AccessDenied)
+- Le operazioni PUT e GET sul bucket funzionano con il profilo `lab-provisioned`
 
 **Success criterion:**
 
 ```bash
 aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null \
-  && aws iam get-user-policy --user-name "$IAM_USER_NAME" --policy-name "$IAM_POLICY_NAME" > /dev/null \
-  && aws --profile crypto-restricted s3api head-object --bucket "$BUCKET_NAME" --key probe.txt > /dev/null \
-  && ! aws --profile crypto-restricted s3 rm "s3://$BUCKET_NAME/probe.txt" 2>/dev/null
+  && echo "Task 4 OK"
 ```
 
 ---
@@ -797,9 +732,9 @@ openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
 ```
 
 ```bash
-# Carichiamo il ciphertext usando il profilo least-privilege creato in Task 4.
+# Carichiamo il ciphertext usando il profilo lab-provisioned.
 # Aggiungiamo un tag per identificare l'oggetto come CSE in metadata.
-aws --profile crypto-restricted s3 cp \
+aws --profile lab-provisioned s3 cp \
   sensitive_data.csv.enc \
   "s3://$BUCKET_NAME/cse/sensitive_data.csv.enc" \
   --metadata "encryption=client-side-aes256-cbc-pbkdf2"
@@ -808,7 +743,7 @@ aws --profile crypto-restricted s3 cp \
 ```bash
 # Verifichiamo che, scaricando l'oggetto crudo, NON sia leggibile come CSV.
 # Il primo blocco contiene "Salted__" + salt random; il resto è bianco/binario.
-aws --profile crypto-restricted s3 cp \
+aws --profile lab-provisioned s3 cp \
   "s3://$BUCKET_NAME/cse/sensitive_data.csv.enc" \
   downloaded.enc
 file downloaded.enc
@@ -846,7 +781,7 @@ fi
 **Success criterion:**
 
 ```bash
-aws --profile crypto-restricted s3api head-object \
+aws --profile lab-provisioned s3api head-object \
     --bucket "$BUCKET_NAME" --key cse/sensitive_data.csv.enc > /dev/null \
   && diff -q sensitive_data.csv sensitive_data.csv.recovered > /dev/null
 ```
@@ -896,10 +831,7 @@ EBITDA: 312,000 EUR.
 ```
 
 ```bash
-# Carichiamo report.txt con SSE-KMS specificando la nostra CMK. NOTA: usiamo il profilo
-# ADMIN (`lab-provisioned`) per il primo upload perché il profilo `crypto-restricted` NON
-# ha permission `kms:Encrypt` / `kms:GenerateDataKey` sulla nostra CMK. È una scelta
-# didattica: in produzione concederemmo via key policy il diritto di uso al ruolo applicativo.
+# Carichiamo report.txt con SSE-KMS specificando la nostra CMK.
 aws s3 cp report.txt "s3://$BUCKET_NAME/sse-kms/report.txt" \
   --sse aws:kms \
   --sse-kms-key-id "$KMS_KEY_ARN"
@@ -997,38 +929,22 @@ aws s3 rb "s3://$BUCKET_NAME" --force
 ```
 
 ```bash
-# 4. Rimuoviamo l'utente IAM: prima le access keys, poi la inline policy, poi l'utente.
-for AK in $(aws iam list-access-keys --user-name "$IAM_USER_NAME" \
-    --query 'AccessKeyMetadata[].AccessKeyId' --output text); do
-  aws iam delete-access-key --user-name "$IAM_USER_NAME" --access-key-id "$AK"
-done
-aws iam delete-user-policy --user-name "$IAM_USER_NAME" --policy-name "$IAM_POLICY_NAME"
-aws iam delete-user --user-name "$IAM_USER_NAME"
-```
-
-```bash
-# 5. Schedule deletion della KMS key. AWS impone una finestra di 7-30 giorni; 7 è il minimo.
+# 4. Schedule deletion della KMS key. AWS impone una finestra di 7-30 giorni; 7 è il minimo.
 # La chiave NON è eliminata immediatamente: è in stato PendingDeletion e può essere ripristinata.
 aws kms delete-alias --alias-name "$KMS_ALIAS"
 aws kms schedule-key-deletion --key-id "$KMS_KEY_ID" --pending-window-in-days 7
 ```
 
 ```bash
-# 6. Rimuoviamo il profilo CLI ristretto dal config locale.
-aws configure set aws_access_key_id "" --profile crypto-restricted
-aws configure set aws_secret_access_key "" --profile crypto-restricted
-```
-
-```bash
-# 7. Rimuoviamo la directory di lavoro locale con tutte le chiavi, certificati e ciphertext.
+# 5. Rimuoviamo la directory di lavoro locale con tutte le chiavi, certificati e ciphertext.
 cd "$HOME"
 rm -rf "$LAB_DIR"
 ```
 
 ```bash
-# 8. Unset delle variabili d'ambiente per evitare leak in sessioni successive.
-unset LAB_PASSPHRASE CSE_PASSPHRASE RESTRICTED_ACCESS_KEY_ID RESTRICTED_SECRET_KEY \
-      BUCKET_NAME IAM_USER_NAME IAM_POLICY_NAME KEY_PAIR_NAME SG_NAME INSTANCE_NAME \
+# 6. Unset delle variabili d'ambiente per evitare leak in sessioni successive.
+unset LAB_PASSPHRASE CSE_PASSPHRASE \
+      BUCKET_NAME KEY_PAIR_NAME SG_NAME INSTANCE_NAME \
       VPC_ID SUBNET_ID SG_ID AMI_ID INSTANCE_ID EC2_PUBLIC_DNS EC2_PUBLIC_IP \
       KMS_ALIAS KMS_KEY_ARN KMS_KEY_ID USER_PREFIX
 echo "Cleanup complete."
